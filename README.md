@@ -1,5 +1,6 @@
 
-![icon](https://github.com/user-attachments/assets/2bea60cd-29d8-4864-8e1d-db7cdcf4aa26)
+![icon](https://github.com/user-attachments/assets/c01447c1-2098-4545-8a15-971d2533488d)
+
 
 
 # IconSwap
