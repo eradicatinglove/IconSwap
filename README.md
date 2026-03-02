@@ -55,6 +55,8 @@ Your image (any size/format)
 | A | Select game / Open folder / Confirm |
 | B | Back |
 | + | Exit |
+| Y | Deletes custom icons from games |
+| - | reboot to payload |
 
 ---
 
