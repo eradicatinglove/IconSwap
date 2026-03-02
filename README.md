@@ -1,3 +1,7 @@
+
+![icon](https://github.com/user-attachments/assets/2bea60cd-29d8-4864-8e1d-db7cdcf4aa26)
+
+
 # IconSwap
 
 A Nintendo Switch homebrew NRO companion tool for [sys-icon](https://github.com/eradicatinglove/sys-icon).
