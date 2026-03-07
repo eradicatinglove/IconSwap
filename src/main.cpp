@@ -2,6 +2,10 @@
  * IconSwap - Nintendo Switch homebrew NRO
  * Assign custom icons to games for use with sys-icon
  * by eradicatinglove
+ *
+ * FTP server added: press X on game list to open FTP menu.
+ * Upload images to sdmc:/icon-manager/ via FTP, then browse
+ * and assign them from the file browser.
  */
 
 #include <switch.h>
@@ -11,6 +15,8 @@
 #include <stdlib.h>
 #include <dirent.h>
 #include <sys/stat.h>
+
+#include "ftp.h"
 
 extern "C" {
 #include "stb_image.h"
@@ -28,7 +34,14 @@ extern "C" {
 #define JPEG_QUALITY    90
 #define MAX_PATH        512
 
-typedef enum { SCREEN_GAMELIST, SCREEN_FILEBROWSER, SCREEN_CONFIRM, SCREEN_RESULT } Screen;
+typedef enum {
+    SCREEN_GAMELIST,
+    SCREEN_FILEBROWSER,
+    SCREEN_CONFIRM,
+    SCREEN_RESULT,
+    SCREEN_REBOOT_CONFIRM,
+    SCREEN_FTP
+} Screen;
 
 typedef struct {
     char name[256];
@@ -36,6 +49,7 @@ typedef struct {
     int  isDir;
 } FileEntry;
 
+// Globals
 static NsApplicationRecord  g_records[MAX_TITLES];
 static char                 g_names[MAX_TITLES][0x201];
 static s32                  g_recordCount = 0;
@@ -51,7 +65,20 @@ static char   g_selectedImg[MAX_PATH] = "";
 static char   g_resultMsg[256]        = "";
 static int    g_resultOk = 0;
 
-// ── Image processing ──────────────────────────────────────────────────────────
+// UTF-8 safe copy: never cuts a multi-byte sequence mid-character
+static void utf8_strncpy(char* dst, const char* src, size_t maxBytes) {
+    if (!maxBytes) return;
+    size_t i = 0, last_safe = 0;
+    while (src[i] && i < maxBytes - 1) {
+        if ((src[i] & 0xC0) != 0x80) last_safe = i;
+        i++;
+    }
+    if (src[i] && (src[i] & 0xC0) == 0x80) i = last_safe;
+    memcpy(dst, src, i);
+    dst[i] = '\0';
+}
+
+// Image processing
 static void jpegWriteCallback(void* ctx, void* data, int size) {
     fwrite(data, 1, size, (FILE*)ctx);
 }
@@ -61,7 +88,6 @@ static int resizeAndSave(const char* srcPath, const char* dstPath, int targetSiz
     unsigned char* srcPixels = stbi_load(srcPath, &srcW, &srcH, &channels, 3);
     if (!srcPixels) return 0;
 
-    // Center crop to square before resizing
     int cropSize = (srcW < srcH) ? srcW : srcH;
     int cropX = (srcW - cropSize) / 2;
     int cropY = (srcH - cropSize) / 2;
@@ -89,7 +115,6 @@ static int resizeAndSave(const char* srcPath, const char* dstPath, int targetSiz
     struct stat st;
     if (result && stat(dstPath, &st) == 0 && st.st_size > maxBytes) {
         remove(dstPath);
-        // Reload and re-crop at lower quality
         srcPixels = stbi_load(srcPath, &srcW, &srcH, &channels, 3);
         if (!srcPixels) { free(dstPixels); return 0; }
         cropSize = (srcW < srcH) ? srcW : srcH;
@@ -131,11 +156,11 @@ static void applyIcon(const char* srcPath, u64 titleId) {
         snprintf(g_resultMsg, sizeof(g_resultMsg), "icon.jpg saved. icon174.jpg failed.");
     } else {
         g_resultOk = 0;
-        snprintf(g_resultMsg, sizeof(g_resultMsg), "Failed! Is the source a valid JPEG?");
+        snprintf(g_resultMsg, sizeof(g_resultMsg), "Failed! Is the source a valid image?");
     }
 }
 
-// ── File browser ──────────────────────────────────────────────────────────────
+// File browser
 static int isImage(const char* name) {
     int len = strlen(name);
     if (len < 4) return 0;
@@ -167,12 +192,12 @@ static void loadDir(const char* path) {
         int plen = strlen(path);
         snprintf(fp, sizeof(fp), "%s%s%s", path, (plen > 0 && path[plen-1] == '/') ? "" : "/", ent->d_name);
         if (ent->d_type == DT_DIR && dc < MAX_FILES) {
-            strncpy(dirs[dc].name,     ent->d_name, sizeof(dirs[0].name) - 1);
-            strncpy(dirs[dc].fullPath, fp,           sizeof(dirs[0].fullPath) - 1);
+            utf8_strncpy(dirs[dc].name, ent->d_name, sizeof(dirs[0].name));
+            strncpy(dirs[dc].fullPath, fp, sizeof(dirs[0].fullPath) - 1);
             dirs[dc].isDir = 1; dc++;
         } else if (isImage(ent->d_name) && fc < MAX_FILES) {
-            strncpy(files[fc].name,     ent->d_name, sizeof(files[0].name) - 1);
-            strncpy(files[fc].fullPath, fp,           sizeof(files[0].fullPath) - 1);
+            utf8_strncpy(files[fc].name, ent->d_name, sizeof(files[0].name));
+            strncpy(files[fc].fullPath, fp, sizeof(files[0].fullPath) - 1);
             files[fc].isDir = 0; fc++;
         }
     }
@@ -190,7 +215,37 @@ static void goUpDir() {
     else g_currentDir[pos+1] = '\0';
 }
 
-// ── Rendering ─────────────────────────────────────────────────────────────────
+// Remove icons
+static void removeIcons(u64 titleId) {
+    char dst256[MAX_PATH], dst174[MAX_PATH];
+    snprintf(dst256, sizeof(dst256), "sdmc:/atmosphere/contents/%016lx/icon.jpg",    titleId);
+    snprintf(dst174, sizeof(dst174), "sdmc:/atmosphere/contents/%016lx/icon174.jpg", titleId);
+    int r1 = remove(dst256);
+    int r2 = remove(dst174);
+    if (r1 == 0 || r2 == 0) {
+        g_resultOk = 1;
+        snprintf(g_resultMsg, sizeof(g_resultMsg), "Icons removed successfully.");
+    } else {
+        g_resultOk = 0;
+        snprintf(g_resultMsg, sizeof(g_resultMsg), "No icons found to remove.");
+    }
+}
+
+// Reboot to payload
+static void rebootToPayload() {
+    spsmShutdown(true);
+}
+
+// Render functions
+static void renderRebootConfirm() {
+    consoleClear();
+    printf("=== IconSwap - Reboot to Payload ===\n\n");
+    printf("Reboot now and load payload?\n\n");
+    printf("Make sure reboot_payload.bin is at:\n");
+    printf("  atmosphere/reboot_payload.bin\n\n");
+    printf("A: Reboot now    B: Cancel\n");
+}
+
 static void renderGameList() {
     consoleClear();
     printf("=== IconSwap - Select Game ===  (Total: %d)\n\n", g_recordCount);
@@ -206,18 +261,19 @@ static void renderGameList() {
         else
             printf("  %s  %016lX  %s\n", tag, g_records[i].application_id, g_names[i]);
     }
-    printf("\nUp/Down: move 1  Left/Right: move 10  A: select game  +: exit\n");
-    printf("[*] = icon already assigned\n");
+    printf("\nUp/Down: move 1  Left/Right: move 10  A: assign icon  +: exit\n");
+    printf("Y: remove icons  -: reboot to payload  X: FTP menu\n");
+    if (ftpIsRunning()) printf("[FTP ON: %s port 5000]\n", ftpGetIp());
 }
 
 static void renderFileBrowser() {
     consoleClear();
-    printf("=== IconSwap - Select JPEG ===\n");
+    printf("=== IconSwap - Select Image ===\n");
     printf("Game: %.60s\n", g_names[g_gameSelected]);
     printf("Dir : %.70s\n\n", g_currentDir);
     int end = g_fileScroll + WINDOW_SIZE;
     if (end > g_fileCount) end = g_fileCount;
-    if (g_fileCount == 0) printf("  (no JPEG files or folders here)\n");
+    if (g_fileCount == 0) printf("  (no image files or folders here)\n");
     for (int i = g_fileScroll; i < end; i++) {
         const char* slash = g_files[i].isDir ? "/" : "";
         if (i == g_fileSelected)
@@ -225,8 +281,8 @@ static void renderFileBrowser() {
         else
             printf("  %.70s%s\n", g_files[i].name, slash);
     }
-    printf("\nUp/Down: move  A: open folder / select image  B: back to game list\n");
-    printf("Supported: JPG PNG BMP TGA\n");
+    printf("\nUp/Down: move  A: open folder / select image  B: back\n");
+    printf("Supported: JPG PNG BMP TGA  (UTF-8 filenames supported)\n");
 }
 
 static void renderConfirm() {
@@ -248,14 +304,35 @@ static void renderResult() {
         printf("OK: %s\n\nReboot Switch to see icon on HOME menu.\n", g_resultMsg);
     else
         printf("ERROR: %s\n", g_resultMsg);
-    printf("\nA: Back to game list    +: Exit\n");
+    printf("\nA: Back to game list    -: Reboot to payload    +: Exit\n");
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+static void renderFtp() {
+    consoleClear();
+    printf("=== IconSwap - FTP Server ===\n\n");
+    if (!ftpIsRunning()) {
+        printf("ERROR: Could not start FTP server.\n");
+        printf("Make sure Wi-Fi is connected.\n\n");
+        printf("Status: %s\n", ftpGetStatus());
+    } else {
+        printf("FTP server: RUNNING\n\n");
+        printf("  IP Address : %s\n", ftpGetIp());
+        printf("  Port       : 5000\n");
+        printf("  Login      : any username / any password\n");
+        printf("  Encoding   : UTF-8\n\n");
+        printf("  Status     : %s\n", ftpGetStatus());
+        printf("  Uploaded   : %d image(s) this session\n", ftpGetFilesReceived());
+    }
+    printf("\nB: Back to game list\n");
+}
+
+// Main
 int main(int argc, char** argv) {
     consoleInit(NULL);
     nsInitialize();
     fsInitialize();
+    spsmInitialize();
+    socketInitializeDefault();
 
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
@@ -277,13 +354,12 @@ int main(int argc, char** argv) {
         if (R_SUCCEEDED(rc)) {
             NacpLanguageEntry* lang = NULL;
             if (R_SUCCEEDED(nacpGetLanguageEntry(&ctrl.nacp, &lang)) && lang != NULL)
-                strncpy(g_names[i], lang->name, sizeof(g_names[i]) - 1);
+                utf8_strncpy(g_names[i], lang->name, sizeof(g_names[i]));
             else
-                strncpy(g_names[i], ctrl.nacp.lang[0].name, sizeof(g_names[i]) - 1);
+                utf8_strncpy(g_names[i], ctrl.nacp.lang[0].name, sizeof(g_names[i]));
         } else {
             snprintf(g_names[i], sizeof(g_names[i]), "%016lX", g_records[i].application_id);
         }
-        g_names[i][sizeof(g_names[i]) - 1] = '\0';
     }
 
     loadDir(g_currentDir);
@@ -329,11 +405,23 @@ int main(int argc, char** argv) {
                 if (kDown & HidNpadButton_A) {
                     if (g_recordCount > 0) {
                         strncpy(g_currentDir, "sdmc:/", sizeof(g_currentDir));
-                        g_fileSelected = 0;
-                        g_fileScroll   = 0;
+                        g_fileSelected = 0; g_fileScroll = 0;
                         loadDir(g_currentDir);
                         g_screen = SCREEN_FILEBROWSER;
                     }
+                }
+                if (kDown & HidNpadButton_Y) {
+                    if (g_recordCount > 0) {
+                        removeIcons(g_records[g_gameSelected].application_id);
+                        g_screen = SCREEN_RESULT;
+                    }
+                }
+                if (kDown & HidNpadButton_Minus) {
+                    g_screen = SCREEN_REBOOT_CONFIRM;
+                }
+                if (kDown & HidNpadButton_X) {
+                    if (!ftpIsRunning()) ftpStart();
+                    g_screen = SCREEN_FTP;
                 }
                 renderGameList();
                 break;
@@ -363,8 +451,7 @@ int main(int argc, char** argv) {
                                 if (len > 0 && g_currentDir[len-1] != '/')
                                     strncat(g_currentDir, "/", sizeof(g_currentDir) - len - 1);
                             }
-                            g_fileSelected = 0;
-                            g_fileScroll   = 0;
+                            g_fileSelected = 0; g_fileScroll = 0;
                             loadDir(g_currentDir);
                         } else {
                             strncpy(g_selectedImg, f->fullPath, sizeof(g_selectedImg) - 1);
@@ -393,7 +480,27 @@ int main(int argc, char** argv) {
                 if (kDown & HidNpadButton_A) {
                     g_screen = SCREEN_GAMELIST;
                 }
+                if (kDown & HidNpadButton_Minus) {
+                    g_screen = SCREEN_REBOOT_CONFIRM;
+                }
                 renderResult();
+                break;
+
+            case SCREEN_REBOOT_CONFIRM:
+                if (kDown & HidNpadButton_A) {
+                    rebootToPayload();
+                }
+                if (kDown & HidNpadButton_B) {
+                    g_screen = SCREEN_GAMELIST;
+                }
+                renderRebootConfirm();
+                break;
+
+            case SCREEN_FTP:
+                if (kDown & HidNpadButton_B) {
+                    g_screen = SCREEN_GAMELIST;
+                }
+                renderFtp();
                 break;
         }
 
@@ -401,6 +508,9 @@ int main(int argc, char** argv) {
     }
 
 cleanup:
+    if (ftpIsRunning()) ftpStop();
+    socketExit();
+    spsmExit();
     fsExit();
     nsExit();
     consoleExit(NULL);

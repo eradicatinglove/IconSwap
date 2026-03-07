@@ -28,7 +28,7 @@ SOURCES		:=	src
 INCLUDES	:=	src
 ROMFS		:=	romfs
 
-VERSION		:=	1.0.0
+VERSION		:=	2.0.0
 
 #---------------------------------------------------------------------------------
 APP_TITLE	:=	IconSwap
