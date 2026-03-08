@@ -17,7 +17,7 @@
 
 ## What is IconSwap?
 
-IconSwap is a Nintendo Switch homebrew NRO that lets you assign custom icons to any installed game, directly from your Switch — no PC required. It works alongside **sys-ticon** to replace icons visible in the HOME menu after a reboot.
+IconSwap is a Nintendo Switch homebrew NRO that lets you assign custom icons to any installed game, directly from your Switch — no PC required. It works alongside **sys-icon** to replace icons visible in the HOME menu after a reboot.
 
 ---
 
