@@ -24,7 +24,7 @@ IconSwap is a Nintendo Switch homebrew NRO that lets you assign custom icons to 
 ## Requirements
 
 - Nintendo Switch running **Atmosphere CFW**
-- **sys-ticon** installed and enabled
+- **sys-icon** installed and enabled
 - Wi-Fi connection (for FTP image upload)
 - Images stored on your SD card under `sdmc:/icon-manager/`
 
