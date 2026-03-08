@@ -64,6 +64,8 @@ static char   g_currentDir[MAX_PATH]  = "sdmc:/";
 static char   g_selectedImg[MAX_PATH] = "";
 static char   g_resultMsg[256]        = "";
 static int    g_resultOk = 0;
+// 0 = crop to square (default), 1 = fit/letterbox (keeps full image, adds black bars)
+static int    g_scaleMode = 0;
 
 // UTF-8 safe copy: never cuts a multi-byte sequence mid-character
 static void utf8_strncpy(char* dst, const char* src, size_t maxBytes) {
@@ -83,58 +85,68 @@ static void jpegWriteCallback(void* ctx, void* data, int size) {
     fwrite(data, 1, size, (FILE*)ctx);
 }
 
-static int resizeAndSave(const char* srcPath, const char* dstPath, int targetSize, int maxBytes) {
-    int srcW, srcH, channels;
-    unsigned char* srcPixels = stbi_load(srcPath, &srcW, &srcH, &channels, 3);
-    if (!srcPixels) return 0;
-
-    int cropSize = (srcW < srcH) ? srcW : srcH;
-    int cropX = (srcW - cropSize) / 2;
-    int cropY = (srcH - cropSize) / 2;
-
-    unsigned char* cropPixels = (unsigned char*)malloc(cropSize * cropSize * 3);
-    if (!cropPixels) { stbi_image_free(srcPixels); return 0; }
-
-    for (int row = 0; row < cropSize; row++) {
-        memcpy(
-            cropPixels + row * cropSize * 3,
-            srcPixels + ((cropY + row) * srcW + cropX) * 3,
-            cropSize * 3
-        );
-    }
-    stbi_image_free(srcPixels);
-
-    unsigned char* dstPixels = (unsigned char*)malloc(targetSize * targetSize * 3);
-    if (!dstPixels) { free(cropPixels); return 0; }
-    stbir_resize_uint8_linear(cropPixels, cropSize, cropSize, 0, dstPixels, targetSize, targetSize, 0, STBIR_RGB);
-    free(cropPixels);
+// Writes a JPEG, retrying at lower quality if file exceeds maxBytes.
+// dstPixels must be targetSize*targetSize*3. Returns 1 on success.
+static int writeJpegWithFallback(const char* dstPath, int targetSize,
+                                  unsigned char* dstPixels, int maxBytes,
+                                  const char* srcPath) {
     FILE* f = fopen(dstPath, "wb");
-    if (!f) { free(dstPixels); return 0; }
+    if (!f) return 0;
     int result = stbi_write_jpg_to_func(jpegWriteCallback, f, targetSize, targetSize, 3, dstPixels, JPEG_QUALITY);
     fclose(f);
     struct stat st;
     if (result && stat(dstPath, &st) == 0 && st.st_size > maxBytes) {
         remove(dstPath);
-        srcPixels = stbi_load(srcPath, &srcW, &srcH, &channels, 3);
-        if (!srcPixels) { free(dstPixels); return 0; }
-        cropSize = (srcW < srcH) ? srcW : srcH;
-        cropX = (srcW - cropSize) / 2;
-        cropY = (srcH - cropSize) / 2;
-        cropPixels = (unsigned char*)malloc(cropSize * cropSize * 3);
+        f = fopen(dstPath, "wb");
+        if (!f) return 0;
+        result = stbi_write_jpg_to_func(jpegWriteCallback, f, targetSize, targetSize, 3, dstPixels, 75);
+        fclose(f);
+    }
+    return result;
+}
+
+// MODE 0 – Crop to square (original behaviour):
+//   Takes the largest centred square from the source, then scales to targetSize.
+// MODE 1 – Fit / letterbox (new):
+//   Scales the full image to fit inside targetSize×targetSize while keeping the
+//   aspect ratio, then centres it on a black canvas.  No pixels are cropped.
+static int resizeAndSave(const char* srcPath, const char* dstPath, int targetSize, int maxBytes) {
+    int srcW, srcH, channels;
+    unsigned char* srcPixels = stbi_load(srcPath, &srcW, &srcH, &channels, 3);
+    if (!srcPixels) return 0;
+
+    unsigned char* dstPixels = (unsigned char*)malloc(targetSize * targetSize * 3);
+    if (!dstPixels) { stbi_image_free(srcPixels); return 0; }
+
+    if (g_scaleMode == 1) {
+        // --- Squeeze mode (for vertical source images + vertical themes) ---
+        // Scale the full image directly to targetSize x targetSize with no
+        // cropping and no padding.  A 600x900 source becomes 256x256; the
+        // vertical .nxtheme then stretches it back to 2:3 on screen,
+        // restoring the original composition correctly.
+        stbir_resize_uint8_linear(srcPixels, srcW, srcH, 0, dstPixels, targetSize, targetSize, 0, STBIR_RGB);
+        stbi_image_free(srcPixels);
+    } else {
+        // --- Crop to square mode (original behaviour) ---
+        int cropSize = (srcW < srcH) ? srcW : srcH;
+        int cropX = (srcW - cropSize) / 2;
+        int cropY = (srcH - cropSize) / 2;
+
+        unsigned char* cropPixels = (unsigned char*)malloc(cropSize * cropSize * 3);
         if (!cropPixels) { stbi_image_free(srcPixels); free(dstPixels); return 0; }
         for (int row = 0; row < cropSize; row++) {
-            memcpy(cropPixels + row * cropSize * 3,
-                   srcPixels + ((cropY + row) * srcW + cropX) * 3,
-                   cropSize * 3);
+            memcpy(
+                cropPixels + row * cropSize * 3,
+                srcPixels + ((cropY + row) * srcW + cropX) * 3,
+                cropSize * 3
+            );
         }
         stbi_image_free(srcPixels);
         stbir_resize_uint8_linear(cropPixels, cropSize, cropSize, 0, dstPixels, targetSize, targetSize, 0, STBIR_RGB);
         free(cropPixels);
-        f = fopen(dstPath, "wb");
-        if (!f) { free(dstPixels); return 0; }
-        result = stbi_write_jpg_to_func(jpegWriteCallback, f, targetSize, targetSize, 3, dstPixels, 75);
-        fclose(f);
     }
+
+    int result = writeJpegWithFallback(dstPath, targetSize, dstPixels, maxBytes, srcPath);
     free(dstPixels);
     return result;
 }
@@ -270,7 +282,18 @@ static void renderFileBrowser() {
     consoleClear();
     printf("=== IconSwap - Select Image ===\n");
     printf("Game: %.60s\n", g_names[g_gameSelected]);
-    printf("Dir : %.70s\n\n", g_currentDir);
+    printf("Dir : %.70s\n", g_currentDir);
+    printf("Mode: %s  (Y: toggle)\n",
+           g_scaleMode == 0 ? "[CROP]  squeeze" : " CROP  [SQUEEZE]");
+    if (g_scaleMode == 0) {
+        printf("Hint: Crops the centre square of your image.\n");
+        printf("      Best for square/landscape images with a\n");
+        printf("      standard square icon theme.\n\n");
+    } else {
+        printf("Hint: Scales the full image to 256x256 (no crop).\n");
+        printf("      for vertical themes 2:3 images (600x900) \n");
+        printf("      theme restores aspect.\n\n");
+    }
     int end = g_fileScroll + WINDOW_SIZE;
     if (end > g_fileCount) end = g_fileCount;
     if (g_fileCount == 0) printf("  (no image files or folders here)\n");
@@ -281,7 +304,7 @@ static void renderFileBrowser() {
         else
             printf("  %.70s%s\n", g_files[i].name, slash);
     }
-    printf("\nUp/Down: move  A: open folder / select image  B: back\n");
+    printf("\nUp/Down: move  A: open/select  B: back  Y: toggle mode\n");
     printf("Supported: JPG PNG BMP TGA  (UTF-8 filenames supported)\n");
 }
 
@@ -291,6 +314,15 @@ static void renderConfirm() {
     printf("Game  : %.60s\n",   g_names[g_gameSelected]);
     printf("TID   : %016lX\n\n", g_records[g_gameSelected].application_id);
     printf("Image : %.70s\n\n", g_selectedImg);
+    if (g_scaleMode == 0) {
+        printf("Mode  : CROP\n");
+        printf("        Crops centre square -> 256x256.\n");
+        printf("        Use with square/landscape images + square theme.\n\n");
+    } else {
+        printf("Mode  : SQUEEZE\n");
+        printf("        Full image scaled to 256x256 (no crop).\n");
+        printf("        Use with 2:3 images (600x900) + vertical theme.\n\n");
+    }
     printf("Will create:\n");
     printf("  icon.jpg    (256x256)\n");
     printf("  icon174.jpg (174x174)\n\n");
@@ -461,6 +493,9 @@ int main(int argc, char** argv) {
                 }
                 if (kDown & HidNpadButton_B) {
                     g_screen = SCREEN_GAMELIST;
+                }
+                if (kDown & HidNpadButton_Y) {
+                    g_scaleMode = (g_scaleMode == 0) ? 1 : 0;
                 }
                 renderFileBrowser();
                 break;
