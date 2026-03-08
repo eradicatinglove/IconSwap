@@ -26,14 +26,14 @@ IconSwap is a Nintendo Switch homebrew NRO that lets you assign custom icons to 
 - Nintendo Switch running **Atmosphere CFW**
 - **sys-icon** installed and enabled
 - Wi-Fi connection (for FTP image upload)
-- Images stored on your SD card under `sdmc:/icon-manager/`
+- Images stored on your SD card under `sdmc:/iconswap/`
 
 ---
 
 ## Installation
 
 1. Copy `IconSwap.nro` to your SD card (e.g. `sdmc:/switch/IconSwap.nro`)
-2. Make sure **sys-ticon** is installed
+2. Make sure **sys-icon** is installed
 3. Launch IconSwap from the Homebrew Menu
 
 ---
@@ -90,7 +90,7 @@ Scales the entire image — width and height — directly into 256×256 with no 
 - ⚠️ Will look distorted on a standard square theme
 - ⚠️ Not recommended for square or landscape source images
 
-> **Tip:** For vertical themes, always use 2:3 source images (600×900 is the standard). SQUEEZE + a vertical theme = perfect result.
+> **Tip:** For vertical themes, always use 2:3 source images (600×900 is the standard). SQUEEZE + a vertical theme
 
 ---
 
@@ -98,7 +98,7 @@ Scales the entire image — width and height — directly into 256×256 with no 
 
 1. On the Game List screen, press **X** to open the FTP menu
 2. Connect your FTP client to the displayed IP address on port **5000**
-3. Upload images to `sdmc:/icon-manager/`
+3. Upload images to `sdmc:/iconswap/`
 4. Press **B** to return to the game list and browse your uploaded images
 
 FTP accepts any username and password.
@@ -146,7 +146,7 @@ If a generated file exceeds the size limit, IconSwap automatically retries at a 
 ## Troubleshooting
 
 **Icon didn't change after reboot**
-- Make sure sys-ticon is correctly installed and enabled
+- Make sure sys-icon is correctly installed and enabled
 - Confirm the files were written to the correct TitleID folder (marked with `[*]` in IconSwap)
 
 **Question mark appears instead of icon**
@@ -162,8 +162,3 @@ If a generated file exceeds the size limit, IconSwap automatically retries at a 
 
 ---
 
-## Credits
-
-- **eradicatinglove** — IconSwap development
-- **masagrator** — sys-ticon sysmodule
-- **nothings/stb** — stb_image, stb_image_resize2, stb_image_write
