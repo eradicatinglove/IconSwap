@@ -52,6 +52,7 @@ typedef struct {
 // Globals
 static NsApplicationRecord  g_records[MAX_TITLES];
 static char                 g_names[MAX_TITLES][0x201];
+static char                 g_authors[MAX_TITLES][0x101];
 static s32                  g_recordCount = 0;
 static FileEntry            g_files[MAX_FILES];
 static int                  g_fileCount   = 0;
@@ -63,6 +64,7 @@ static int    g_fileScroll   = 0;
 static char   g_currentDir[MAX_PATH]  = "sdmc:/";
 static char   g_selectedImg[MAX_PATH] = "";
 static char   g_resultMsg[256]        = "";
+static char   g_configMsg[256]        = "";
 static int    g_resultOk = 0;
 // 0 = crop to square (default), 1 = fit/letterbox (keeps full image, adds black bars)
 static int    g_scaleMode = 0;
@@ -151,7 +153,34 @@ static int resizeAndSave(const char* srcPath, const char* dstPath, int targetSiz
     return result;
 }
 
-static void applyIcon(const char* srcPath, u64 titleId) {
+// Writes a stock config.ini for sys-icon into the title's contents folder.
+// Pre-filled with the game's real name and author from NACP so sys-icon never
+// shows a blank title. The user can edit the values via FTP at any time.
+// Returns 1 if a new file was created, 0 if one already existed (skipped).
+static int writeConfigIni(u64 titleId, const char* name, const char* author) {
+    char cfgPath[MAX_PATH];
+    snprintf(cfgPath, sizeof(cfgPath),
+             "sdmc:/atmosphere/contents/%016lx/config.ini", titleId);
+
+    // Only create if it doesn't already exist – don't overwrite user edits.
+    struct stat st;
+    if (stat(cfgPath, &st) == 0) return 0;  // already exists
+
+    FILE* f = fopen(cfgPath, "w");
+    if (!f) return 0;
+    fprintf(f,
+        "[override_nacp]\n"
+        "name=%s\n"
+        "author=%s\n"
+        "display_version=\n",
+        name   ? name   : "",
+        author ? author : ""
+    );
+    fclose(f);
+    return 1;  // freshly created
+}
+
+static void applyIcon(const char* srcPath, u64 titleId, const char* name, const char* author) {
     char dst256[MAX_PATH], dst174[MAX_PATH];
     char folder[MAX_PATH];
     snprintf(folder, sizeof(folder), "sdmc:/atmosphere/contents/%016lx", titleId);
@@ -161,14 +190,25 @@ static void applyIcon(const char* srcPath, u64 titleId) {
     int ok256 = resizeAndSave(srcPath, dst256, ICON256_SIZE, ICON256_MAXB);
     int ok174 = resizeAndSave(srcPath, dst174, ICON174_SIZE, ICON174_MAXB);
     if (ok256 && ok174) {
+        int cfgCreated = writeConfigIni(titleId, name, author);
         g_resultOk = 1;
         snprintf(g_resultMsg, sizeof(g_resultMsg), "icon.jpg and icon174.jpg saved!");
+        if (cfgCreated)
+            snprintf(g_configMsg, sizeof(g_configMsg), "config.ini created with game name.");
+        else
+            snprintf(g_configMsg, sizeof(g_configMsg), "config.ini already exists - not overwritten.");
     } else if (ok256) {
+        int cfgCreated = writeConfigIni(titleId, name, author);
         g_resultOk = 1;
         snprintf(g_resultMsg, sizeof(g_resultMsg), "icon.jpg saved. icon174.jpg failed.");
+        if (cfgCreated)
+            snprintf(g_configMsg, sizeof(g_configMsg), "config.ini created with game name.");
+        else
+            snprintf(g_configMsg, sizeof(g_configMsg), "config.ini already exists - not overwritten.");
     } else {
         g_resultOk = 0;
         snprintf(g_resultMsg, sizeof(g_resultMsg), "Failed! Is the source a valid image?");
+        g_configMsg[0] = '\0';
     }
 }
 
@@ -325,17 +365,23 @@ static void renderConfirm() {
     }
     printf("Will create:\n");
     printf("  icon.jpg    (256x256)\n");
-    printf("  icon174.jpg (174x174)\n\n");
+    printf("  icon174.jpg (174x174)\n");
+    printf("  config.ini  (stock, edit via FTP to override name/author)\n\n");
     printf("A: Confirm and apply    B: Cancel\n");
 }
 
 static void renderResult() {
     consoleClear();
     printf("=== IconSwap - Done ===\n\n");
-    if (g_resultOk)
-        printf("OK: %s\n\nReboot Switch to see icon on HOME menu.\n", g_resultMsg);
-    else
+    if (g_resultOk) {
+        printf("OK: %s\n", g_resultMsg);
+        if (g_configMsg[0]) printf("    %s\n", g_configMsg);
+        printf("\nTip: Use FTP (X on game list) to edit config.ini and\n");
+        printf("     set name= / author= / display_version= for sys-icon.\n\n");
+        printf("Reboot Switch to see changes on HOME menu.\n");
+    } else {
         printf("ERROR: %s\n", g_resultMsg);
+    }
     printf("\nA: Back to game list    -: Reboot to payload    +: Exit\n");
 }
 
@@ -385,12 +431,16 @@ int main(int argc, char** argv) {
              g_records[i].application_id, &ctrl, sizeof(ctrl), &ctrlSize);
         if (R_SUCCEEDED(rc)) {
             NacpLanguageEntry* lang = NULL;
-            if (R_SUCCEEDED(nacpGetLanguageEntry(&ctrl.nacp, &lang)) && lang != NULL)
-                utf8_strncpy(g_names[i], lang->name, sizeof(g_names[i]));
-            else
-                utf8_strncpy(g_names[i], ctrl.nacp.lang[0].name, sizeof(g_names[i]));
+            if (R_SUCCEEDED(nacpGetLanguageEntry(&ctrl.nacp, &lang)) && lang != NULL) {
+                utf8_strncpy(g_names[i],   lang->name,   sizeof(g_names[i]));
+                utf8_strncpy(g_authors[i], lang->author, sizeof(g_authors[i]));
+            } else {
+                utf8_strncpy(g_names[i],   ctrl.nacp.lang[0].name,   sizeof(g_names[i]));
+                utf8_strncpy(g_authors[i], ctrl.nacp.lang[0].author, sizeof(g_authors[i]));
+            }
         } else {
-            snprintf(g_names[i], sizeof(g_names[i]), "%016lX", g_records[i].application_id);
+            snprintf(g_names[i],   sizeof(g_names[i]),   "%016lX", g_records[i].application_id);
+            g_authors[i][0] = '\0';
         }
     }
 
@@ -502,7 +552,10 @@ int main(int argc, char** argv) {
 
             case SCREEN_CONFIRM:
                 if (kDown & HidNpadButton_A) {
-                    applyIcon(g_selectedImg, g_records[g_gameSelected].application_id);
+                    applyIcon(g_selectedImg,
+                              g_records[g_gameSelected].application_id,
+                              g_names[g_gameSelected],
+                              g_authors[g_gameSelected]);
                     g_screen = SCREEN_RESULT;
                 }
                 if (kDown & HidNpadButton_B) {
